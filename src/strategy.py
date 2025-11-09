@@ -50,6 +50,7 @@ class Trade:
     take_profit: float
     risk_value: float
     risk_type: StopMode
+    cost_multiplier: float = 1.0
     exit_time: Optional[datetime] = None
     exit_price: Optional[float] = None
     exit_reason: Optional[TradeExit] = None
@@ -61,9 +62,11 @@ class Trade:
             return None
 
         if self.direction == "long":
-            return (self.exit_price - self.entry_price) * self.quantity
+            raw = (self.exit_price - self.entry_price) * self.quantity
+        else:
+            raw = (self.entry_price - self.exit_price) * self.quantity
 
-        return (self.entry_price - self.exit_price) * self.quantity
+        return raw * self.cost_multiplier
 
 
 class BaseStrategy:

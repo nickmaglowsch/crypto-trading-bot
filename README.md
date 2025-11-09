@@ -32,7 +32,7 @@ python -m src.run_strategy --strategy momentum --symbol BTC/USDT --timeframe 15m
 Command line options:
 
 - `--strategy`: Choose `intraday_range` (default) or `momentum`.
-- `--symbol`: Binance market symbol.
+- `--symbol`: Binance market symbol or comma-separated list for a multi-asset run.
 - `--timeframe`: Candle timeframe (1m, 5m, 15m, etc).
 - `--days`: Number of trailing days to evaluate.
 - `--atr-period`: Lookback for ATR (default 14).
@@ -43,6 +43,7 @@ Command line options:
 - `--cache-ttl-hours`: Reuse cached data younger than this many hours (default 6.0, set 0 to force refresh).
 - `--plot-equity`: Show a matplotlib equity curve after the run (requires `matplotlib`).
 - `--position-fraction`: Fraction of capital used per trade (1.0 = 100%, >1.0 allows leverage).
+- `--trading-cost`: Percentage trading cost deducted per trade (e.g. 0.001 = 0.1%, applied on both entry and exit).
 - `--sma-period`: Apply a simple moving average filter (longs only above SMA, shorts only below).
 - `--stop-mode`: Choose `atr` (default) or `swing` to use distance from the latest swing high/low as the stop.
 - `--swing-period`: Number of candles to look back for swing-based stops (defaults to 20 when `--stop-mode swing`).
@@ -54,7 +55,7 @@ Command line options:
 
 The script prints each trade, its entry/exit details and cumulative PnL (in quote currency units). Use this to gauge performance before considering a live deployment.
 
-The summary now includes basic backtest metrics such as win rate, average win/loss, expectancy, an equity curve based on the chosen starting capital, plus separate long/short win rates and average outcomes.
+The summary now includes basic backtest metrics such as win rate, average win/loss, expectancy, an equity curve based on the chosen starting capital, plus separate long/short win rates and average outcomes. When you pass multiple symbols, the runner evaluates each asset individually and combines trades into a portfolio while respecting the maximum simultaneous holdings implied by `--position-fraction` (e.g. `0.5` allows up to two concurrent positions).
 
 ## Next Steps
 

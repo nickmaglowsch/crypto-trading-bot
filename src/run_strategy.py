@@ -5,6 +5,7 @@ CLI entry point for running the strategy sandbox on historical Binance data.
 from __future__ import annotations
 
 import argparse
+from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
 from typing import Optional, cast
 
@@ -19,6 +20,21 @@ from .strategy import (
     Trade,
     TradePreference,
 )
+def apply_trading_cost(trade: Trade, trading_cost: float) -> Trade:
+    if trading_cost <= 0:
+        return trade
+
+    if trading_cost >= 1:
+        raise SystemExit("--trading-cost must be less than 1 (100%).")
+
+    cost_multiplier = 1 - 2 * trading_cost
+
+    adjusted_trade = replace(trade)
+    adjusted_trade.cost_multiplier = cost_multiplier
+    note_suffix = f"(fees {trading_cost:.4%} per side)"
+    adjusted_trade.notes = f"{trade.notes} {note_suffix}".strip()
+
+    return adjusted_trade
 
 
 def parse_args() -> argparse.Namespace:
@@ -31,7 +47,11 @@ def parse_args() -> argparse.Namespace:
         default="intraday_range",
         help="Choose which strategy to evaluate.",
     )
-    parser.add_argument("--symbol", default="BTC/USDT", help="Trading pair symbol.")
+    parser.add_argument(
+        "--symbol",
+        default="BTC/USDT",
+        help="Trading pair symbol or comma-separated list for multi-asset runs.",
+    )
     parser.add_argument(
         "--timeframe",
         default="5m",
@@ -88,6 +108,12 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=1.0,
         help="Fraction of capital to allocate per trade (1.0 = 100%, >1.0 uses leverage).",
+    )
+    parser.add_argument(
+        "--trading-cost",
+        type=float,
+        default=0.0,
+        help="Percentage trading cost applied to each trade (e.g. 0.001 = 0.1%).",
     )
     parser.add_argument(
         "--sma-period",
@@ -152,7 +178,7 @@ def print_trade_summary(trades: list[Trade]) -> None:
         pnl = trade.pnl()
         pnl_str = f"{pnl:.2f}" if pnl is not None else "N/A"
         print(
-            f"[{trade.entry_time:%Y-%m-%d %H:%M}] {trade.direction.upper()} "
+            f"[{trade.entry_time:%Y-%m-%d %H:%M}] {trade.symbol} {trade.direction.upper()} "
             f"entry={trade.entry_price:.2f} stop={trade.stop_loss:.2f} "
             f"target={trade.take_profit:.2f} exit={trade.exit_reason} pnl={pnl_str}"
             f" qty={trade.quantity:.4f}"
@@ -168,18 +194,15 @@ def main() -> None:
         use_testnet=args.testnet,
     )
 
-    end_time = datetime.now(tz=timezone.utc)
-    frame = fetch_ohlcv_dataframe(
-        args.symbol,
-        args.timeframe,
-        days=args.days,
-        end_time=end_time,
-        config=config,
-        cache_dir=args.cache_dir or None,
-        cache_ttl=None if args.cache_ttl_hours <= 0 else timedelta(hours=args.cache_ttl_hours),
-    )
+    symbols = [s.strip() for s in args.symbol.split(",") if s.strip()]
+    if not symbols:
+        raise SystemExit("No valid symbols provided via --symbol.")
 
-    settings = StrategySettings(
+    if args.position_fraction <= 0:
+        raise SystemExit("--position-fraction must be greater than zero.")
+
+    end_time = datetime.now(tz=timezone.utc)
+    base_settings = StrategySettings(
         atr_period=args.atr_period,
         reward_multiple=args.reward_multiple,
         session_timezone=timezone(timedelta(hours=args.session_offset)),
@@ -190,15 +213,52 @@ def main() -> None:
         capital_base=args.initial_capital,
         position_fraction=args.position_fraction,
     )
-    if args.strategy == "intraday_range":
-        strategy = IntradayRangeStrategy(symbol=args.symbol, settings=settings)
-    else:
-        strategy = MomentumBreakoutStrategy(symbol=args.symbol, settings=settings)
-    trades = strategy.evaluate(frame)
-    print_trade_summary(trades)
+    settings_kwargs = asdict(base_settings)
+    strategy_cls = IntradayRangeStrategy if args.strategy == "intraday_range" else MomentumBreakoutStrategy
+
+    all_trades: list[Trade] = []
+    for symbol in symbols:
+        symbol_settings = StrategySettings(**settings_kwargs)
+        frame = fetch_ohlcv_dataframe(
+            symbol,
+            args.timeframe,
+            days=args.days,
+            end_time=end_time,
+            config=config,
+            cache_dir=args.cache_dir or None,
+            cache_ttl=None if args.cache_ttl_hours <= 0 else timedelta(hours=args.cache_ttl_hours),
+        )
+        strategy = strategy_cls(symbol=symbol, settings=symbol_settings)
+        all_trades.extend(strategy.evaluate(frame))
+
+    max_positions = 1 if args.position_fraction >= 1 else max(1, int(1 / args.position_fraction))
+    accepted_trades: list[Trade] = []
+    active_trades: list[Trade] = []
+
+    for trade in sorted(all_trades, key=lambda t: t.entry_time):
+        active_trades = [
+            t for t in active_trades if t.exit_time is None or t.exit_time > trade.entry_time
+        ]
+
+        if len(active_trades) >= max_positions:
+            continue
+
+        accepted_trades.append(trade)
+        active_trades.append(trade)
+
+    trading_cost = args.trading_cost
+    if trading_cost < 0:
+        raise SystemExit("--trading-cost must be non-negative.")
+
+    adjusted_trades: list[Trade] = []
+    for trade in accepted_trades:
+        adjusted_trade = apply_trading_cost(trade, trading_cost)
+        adjusted_trades.append(adjusted_trade)
+
+    print_trade_summary(adjusted_trades)
 
     backtester = Backtester(initial_capital=args.initial_capital)
-    result = backtester.run(trades)
+    result = backtester.run(adjusted_trades)
 
     print()
     print("Backtest metrics")
@@ -231,7 +291,7 @@ def main() -> None:
 
         plt.figure(figsize=(10, 5))  # type: ignore[attr-defined]
         plt.plot(result.equity_curve.index, result.equity_curve.values, marker="o")
-        plt.title(f"Equity Curve – {args.symbol} ({args.timeframe})")
+        plt.title(f"Equity Curve – {', '.join(symbols)} ({args.timeframe})")
         plt.xlabel("Trade #")
         plt.ylabel("Equity")
         plt.grid(True, linestyle="--", alpha=0.5)

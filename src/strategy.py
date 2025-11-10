@@ -55,6 +55,7 @@ class Trade:
     exit_price: Optional[float] = None
     exit_reason: Optional[TradeExit] = None
     notes: str = ""
+    fees_paid: float = 0.0
 
     def pnl(self) -> Optional[float]:
         """Return absolute profit or loss if the trade has closed."""
@@ -67,6 +68,11 @@ class Trade:
             raw = (self.entry_price - self.exit_price) * self.quantity
 
         return raw * self.cost_multiplier
+
+    def holding_period(self) -> Optional[timedelta]:
+        if self.exit_time is None:
+            return None
+        return self.exit_time - self.entry_time
 
 
 class BaseStrategy:

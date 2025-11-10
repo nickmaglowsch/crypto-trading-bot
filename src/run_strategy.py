@@ -31,7 +31,10 @@ def apply_trading_cost(trade: Trade, trading_cost: float) -> Trade:
 
     adjusted_trade = replace(trade)
     adjusted_trade.cost_multiplier = cost_multiplier
-    note_suffix = f"(fees {trading_cost:.4%} per side)"
+    gross_notional = trade.entry_price * trade.quantity
+    fees_paid = gross_notional * trading_cost * 2
+    adjusted_trade.fees_paid = fees_paid
+    note_suffix = f"(fees {trading_cost:.4%} per side, total paid {fees_paid:.2f})"
     adjusted_trade.notes = f"{trade.notes} {note_suffix}".strip()
 
     return adjusted_trade
@@ -269,6 +272,9 @@ def main() -> None:
     print(f"Average loss: {result.average_loss:.2f}")
     print(f"Expectancy (per trade): {result.expectancy:.2f}")
     print(f"Final equity: {result.equity_curve.iloc[-1]:.2f}")
+    print(f"Sharpe ratio: {result.sharpe_ratio:.2f}")
+    print(f"Portfolio max drawdown: {result.portfolio_max_drawdown:.2f}")
+    print(f"Total fees paid: {result.total_fees_paid:.2f}")
     print()
     print("Long trades")
     print(f"  Count: {len([t for t in result.trades if t.direction == 'long'])}")
@@ -280,6 +286,13 @@ def main() -> None:
     print(f"  Win rate: {result.short_win_rate*100:.1f}%")
     print(f"  Average win: {result.short_average_win:.2f}")
     print(f"  Average loss: {result.short_average_loss:.2f}")
+    print()
+    print("Average holding time (minutes) per asset:")
+    for asset, minutes in result.average_holding_minutes.items():
+        print(f"  {asset}: {minutes:.1f}")
+    print("Max drawdown per asset:")
+    for asset, dd in result.asset_drawdowns.items():
+        print(f"  {asset}: {dd:.2f}")
 
     if args.plot_equity:
         try:

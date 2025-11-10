@@ -57,6 +57,14 @@ The script prints each trade, its entry/exit details and cumulative PnL (in quot
 
 The summary now includes basic backtest metrics such as win rate, average win/loss, expectancy, an equity curve based on the chosen starting capital, plus separate long/short win rates and average outcomes. When you pass multiple symbols, the runner evaluates each asset individually and combines trades into a portfolio while respecting the maximum simultaneous holdings implied by `--position-fraction` (e.g. `0.5` allows up to two concurrent positions).
 
+Additional analytics printed after each run:
+
+- Sharpe ratio of the combined portfolio.
+- Portfolio-level maximum drawdown.
+- Per-asset maximum drawdown.
+- Average holding time (in minutes) for each asset.
+- Total fees paid across all trades.
+
 ## Next Steps
 
 - Connect the signals to live order execution via ccxt.

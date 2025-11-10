@@ -5,7 +5,7 @@ Simple backtesting helpers for strategy trade results.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Optional, Dict, Tuple
 
 import pandas as pd
 
@@ -32,6 +32,11 @@ class BacktestResult:
     short_average_win: float
     short_average_loss: float
     equity_curve: pd.Series
+    sharpe_ratio: float
+    portfolio_max_drawdown: float
+    asset_drawdowns: Dict[str, float]
+    average_holding_minutes: Dict[str, float]
+    total_fees_paid: float
 
 
 class Backtester:
@@ -105,6 +110,22 @@ class Backtester:
             equity_values.append(equity_values[-1] + pnl)
         equity_curve = pd.Series(equity_values, name="equity")
 
+        returns = pd.Series(pnl_values) / self.initial_capital if pnl_values else pd.Series(dtype=float)
+        sharpe_ratio = (
+            (returns.mean() / returns.std()) * (len(returns) ** 0.5)
+            if len(returns) > 1 and returns.std() != 0
+            else 0.0
+        )
+
+        running_max = equity_curve.cummax()
+        drawdowns = equity_curve - running_max
+        portfolio_max_drawdown = drawdowns.min() if not drawdowns.empty else 0.0
+
+        asset_drawdowns = self._asset_drawdowns(trade_list)
+        average_holding_minutes = self._average_holding_minutes(trade_list)
+
+        total_fees_paid = sum(t.fees_paid for t in trade_list)
+
         return BacktestResult(
             trades=trade_list,
             total_trades=total_trades,
@@ -122,5 +143,34 @@ class Backtester:
             short_average_win=short_avg_win,
             short_average_loss=short_avg_loss,
             equity_curve=equity_curve,
+            sharpe_ratio=float(sharpe_ratio),
+            portfolio_max_drawdown=float(portfolio_max_drawdown),
+            asset_drawdowns=asset_drawdowns,
+            average_holding_minutes=average_holding_minutes,
+            total_fees_paid=float(total_fees_paid),
         )
+
+    def _asset_drawdowns(self, trades: List[Trade]) -> Dict[str, float]:
+        asset_to_drawdown: Dict[str, float] = {}
+        for symbol in {trade.symbol for trade in trades}:
+            symbol_trades = [t for t in trades if t.symbol == symbol]
+            pnl_values = [t.pnl() for t in symbol_trades if t.pnl() is not None]
+            equity_values = [0.0]
+            for pnl in pnl_values:
+                equity_values.append(equity_values[-1] + pnl)
+            equity_curve = pd.Series(equity_values)
+            drawdown = (equity_curve - equity_curve.cummax()).min() if not equity_curve.empty else 0.0
+            asset_to_drawdown[symbol] = float(drawdown)
+        return asset_to_drawdown
+
+    def _average_holding_minutes(self, trades: List[Trade]) -> Dict[str, float]:
+        asset_to_minutes: Dict[str, float] = {}
+        for symbol in {trade.symbol for trade in trades}:
+            durations = [
+                t.holding_period().total_seconds() / 60
+                for t in trades
+                if t.symbol == symbol and t.holding_period() is not None
+            ]
+            asset_to_minutes[symbol] = float(sum(durations) / len(durations)) if durations else 0.0
+        return asset_to_minutes
 

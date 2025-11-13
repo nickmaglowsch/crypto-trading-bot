@@ -2,8 +2,15 @@
 
 This project provides a small framework for experimenting with Binance spot strategies. It currently includes:
 
+**Mean Reversion Strategies:**
 - **Intraday Range Fade** – watch the first 4 hours of the session, fade breaks that return into the range.
+- **Bollinger Bands Mean Reversion** – trade bounces off the upper/lower Bollinger Bands, targeting mean reversion back to the middle band.
+- **RSI Mean Reversion** – trade oversold/overbought conditions when RSI drops below 30 or rises above 70.
+
+**Trend Following Strategies:**
 - **Momentum Breakout** – go with momentum when price pushes above yesterday's high or below yesterday's low.
+- **Moving Average Crossover** – trade golden cross (fast EMA crosses above slow EMA) and death cross (fast EMA crosses below slow EMA).
+- **Volume Breakout** – trade breakouts above recent highs or below recent lows, confirmed by volume spikes above average.
 
 The code uses [`ccxt`](https://github.com/ccxt/ccxt) to pull historical candles and pandas to backtest the logic.
 
@@ -29,9 +36,33 @@ To try the momentum breakout with swing-based risk:
 python -m src.run_strategy --strategy momentum --symbol BTC/USDT --timeframe 15m --days 10 --stop-mode swing --swing-period 20
 ```
 
+To try the Bollinger Bands mean reversion strategy:
+
+```bash
+python -m src.run_strategy --strategy bollinger_reversion --symbol BTC/USDT --timeframe 15m --days 10 --bb-period 20 --bb-std 2.0
+```
+
+To try the RSI mean reversion strategy:
+
+```bash
+python -m src.run_strategy --strategy rsi_reversion --symbol BTC/USDT --timeframe 15m --days 10 --rsi-period 14 --rsi-oversold 30 --rsi-overbought 70
+```
+
+To try the Moving Average Crossover strategy:
+
+```bash
+python -m src.run_strategy --strategy ma_crossover --symbol BTC/USDT --timeframe 15m --days 10 --ema-fast 12 --ema-slow 26
+```
+
+To try the Volume Breakout strategy:
+
+```bash
+python -m src.run_strategy --strategy volume_breakout --symbol BTC/USDT --timeframe 15m --days 10 --volume-ma-period 20 --volume-multiplier 1.5
+```
+
 Command line options:
 
-- `--strategy`: Choose `intraday_range` (default) or `momentum`.
+- `--strategy`: Choose `intraday_range` (default), `momentum`, `bollinger_reversion`, `rsi_reversion`, `ma_crossover`, or `volume_breakout`.
 - `--symbol`: Binance market symbol or comma-separated list for a multi-asset run.
 - `--timeframe`: Candle timeframe (1m, 5m, 15m, etc).
 - `--days`: Number of trailing days to evaluate.
@@ -48,6 +79,15 @@ Command line options:
 - `--stop-mode`: Choose `atr` (default) or `swing` to use distance from the latest swing high/low as the stop.
 - `--swing-period`: Number of candles to look back for swing-based stops (defaults to 20 when `--stop-mode swing`).
 - `--trade-directions`: Limit trades to `long`, `short`, or `both` (default).
+- `--bb-period`: Bollinger Bands period (default 20, only for `bollinger_reversion` strategy).
+- `--bb-std`: Bollinger Bands standard deviation multiplier (default 2.0, only for `bollinger_reversion` strategy).
+- `--rsi-period`: RSI lookback period (default 14, only for `rsi_reversion` strategy).
+- `--rsi-oversold`: RSI oversold threshold for long entries (default 30.0, only for `rsi_reversion` strategy).
+- `--rsi-overbought`: RSI overbought threshold for short entries (default 70.0, only for `rsi_reversion` strategy).
+- `--ema-fast`: Fast EMA period (default 12, only for `ma_crossover` strategy).
+- `--ema-slow`: Slow EMA period (default 26, only for `ma_crossover` strategy).
+- `--volume-ma-period`: Volume moving average period (default 20, only for `volume_breakout` strategy).
+- `--volume-multiplier`: Volume multiplier threshold for breakout confirmation (default 1.5, only for `volume_breakout` strategy).
 - `--testnet`: Toggle Binance sandbox mode for future live order routing.
 - `--api-key`/`--api-secret`: Optional credentials (not needed for historical data).
 

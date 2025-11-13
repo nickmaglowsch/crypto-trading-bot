@@ -10,7 +10,15 @@ from typing import List, Literal, Optional, Tuple
 
 import pandas as pd
 
-from .indicators import average_true_range, simple_moving_average
+from .indicators import (
+    average_true_range,
+    bollinger_bands,
+    exponential_moving_average,
+    macd,
+    relative_strength_index,
+    simple_moving_average,
+    volume_moving_average,
+)
 
 TradeDirection = Literal["long", "short"]
 TradeExit = Literal["take_profit", "stop_loss"]
@@ -35,6 +43,18 @@ class StrategySettings:
     trade_directions: TradePreference = "both"
     capital_base: float = 1.0
     position_fraction: float = 1.0
+    bb_period: int = 20
+    bb_std: float = 2.0
+    rsi_period: int = 14
+    rsi_oversold: float = 30.0
+    rsi_overbought: float = 70.0
+    ema_fast_period: int = 12
+    ema_slow_period: int = 26
+    macd_fast_period: int = 12
+    macd_slow_period: int = 26
+    macd_signal_period: int = 9
+    volume_ma_period: int = 20
+    volume_multiplier: float = 1.5
 
 
 @dataclass
@@ -425,6 +445,556 @@ class MomentumBreakoutStrategy(BaseStrategy):
         if active_trade:
             active_trade.exit_time = day_frame.index[-1]
             active_trade.exit_price = day_frame.iloc[-1]["close"]
+            active_trade.exit_reason = "stop_loss"
+            trades.append(active_trade)
+
+        return trades
+
+
+class BollingerBandsMeanReversionStrategy(BaseStrategy):
+    """
+    Mean reversion strategy using Bollinger Bands.
+    
+    Enters long when price touches or breaks below the lower band (oversold),
+    and enters short when price touches or breaks above the upper band (overbought).
+    Exits when price returns toward the middle band or hits stop/target.
+    """
+
+    def evaluate(self, frame: pd.DataFrame) -> List[Trade]:
+        prepared = self.prepare(frame)
+        
+        # Add Bollinger Bands
+        bollinger_bands(
+            prepared,
+            period=self.settings.bb_period,
+            num_std=self.settings.bb_std,
+            sma_column="bb_sma",
+            upper_column="bb_upper",
+            lower_column="bb_lower",
+            middle_column="bb_middle",
+        )
+        
+        trades: list[Trade] = []
+        active_trade: Optional[Trade] = None
+
+        for timestamp, row in prepared.iterrows():
+            price = row["close"]
+            bb_upper = row.get("bb_upper")
+            bb_lower = row.get("bb_lower")
+            bb_middle = row.get("bb_middle")
+            sma_value = row.get("sma")
+
+            # Skip if Bollinger Bands aren't ready
+            if pd.isna(bb_upper) or pd.isna(bb_lower) or pd.isna(bb_middle):
+                continue
+
+            # Manage active trade
+            active_trade, closed_trade = self._manage_active_trade(active_trade, timestamp, row)
+            if closed_trade:
+                trades.append(closed_trade)
+                continue
+
+            # Only enter new trades if we don't have an active one
+            if active_trade:
+                continue
+
+            # Long entry: price touches or breaks below lower band (oversold bounce)
+            if self.settings.trade_directions in ("long", "both"):
+                if row["low"] <= bb_lower:
+                    # Optional SMA filter: only long if price is above SMA (trend filter)
+                    if self.settings.sma_period and (pd.isna(sma_value) or price < sma_value):
+                        continue
+
+                    risk_distance = self._compute_risk_distance(
+                        "long", price, row.get("atr"), row.get("swing_low"), row.get("swing_high")
+                    )
+                    if risk_distance is None or risk_distance <= 0:
+                        continue
+
+                    quantity = self._position_quantity(price)
+                    if quantity is None or quantity <= 0:
+                        continue
+
+                    entry_price = price
+                    stop_loss = entry_price - risk_distance
+                    take_profit = entry_price + self.settings.reward_multiple * risk_distance
+                    
+                    # Alternative: target middle band if it's closer than ATR-based target
+                    middle_target = bb_middle
+                    if middle_target > take_profit:
+                        take_profit = middle_target
+
+                    active_trade = Trade(
+                        symbol=self.symbol,
+                        direction="long",
+                        entry_time=timestamp,
+                        entry_price=entry_price,
+                        quantity=quantity,
+                        stop_loss=stop_loss,
+                        take_profit=take_profit,
+                        risk_value=risk_distance,
+                        risk_type=self.settings.stop_mode,
+                        notes=f"BB mean reversion: oversold bounce from lower band ({bb_lower:.2f})",
+                    )
+                    continue
+
+            # Short entry: price touches or breaks above upper band (overbought fade)
+            if self.settings.trade_directions in ("short", "both"):
+                if row["high"] >= bb_upper:
+                    # Optional SMA filter: only short if price is below SMA (trend filter)
+                    if self.settings.sma_period and (pd.isna(sma_value) or price > sma_value):
+                        continue
+
+                    risk_distance = self._compute_risk_distance(
+                        "short", price, row.get("atr"), row.get("swing_low"), row.get("swing_high")
+                    )
+                    if risk_distance is None or risk_distance <= 0:
+                        continue
+
+                    quantity = self._position_quantity(price)
+                    if quantity is None or quantity <= 0:
+                        continue
+
+                    entry_price = price
+                    stop_loss = entry_price + risk_distance
+                    take_profit = entry_price - self.settings.reward_multiple * risk_distance
+                    
+                    # Alternative: target middle band if it's closer than ATR-based target
+                    middle_target = bb_middle
+                    if middle_target < take_profit:
+                        take_profit = middle_target
+
+                    active_trade = Trade(
+                        symbol=self.symbol,
+                        direction="short",
+                        entry_time=timestamp,
+                        entry_price=entry_price,
+                        quantity=quantity,
+                        stop_loss=stop_loss,
+                        take_profit=take_profit,
+                        risk_value=risk_distance,
+                        risk_type=self.settings.stop_mode,
+                        notes=f"BB mean reversion: overbought fade from upper band ({bb_upper:.2f})",
+                    )
+                    continue
+
+        # Close any remaining active trade at the end
+        if active_trade:
+            active_trade.exit_time = prepared.index[-1]
+            active_trade.exit_price = prepared.iloc[-1]["close"]
+            active_trade.exit_reason = "stop_loss"
+            trades.append(active_trade)
+
+        return trades
+
+
+class RSIMeanReversionStrategy(BaseStrategy):
+    """
+    Mean reversion strategy using RSI (Relative Strength Index).
+    
+    Enters long when RSI drops below oversold threshold (typically <30),
+    and enters short when RSI rises above overbought threshold (typically >70).
+    Exits when RSI returns to neutral zone or hits stop/target.
+    """
+
+    def evaluate(self, frame: pd.DataFrame) -> List[Trade]:
+        prepared = self.prepare(frame)
+        
+        # Add RSI
+        relative_strength_index(
+            prepared,
+            period=self.settings.rsi_period,
+            column_name="rsi",
+        )
+        
+        trades: list[Trade] = []
+        active_trade: Optional[Trade] = None
+        long_triggered = False
+        short_triggered = False
+
+        for timestamp, row in prepared.iterrows():
+            price = row["close"]
+            rsi = row.get("rsi")
+            sma_value = row.get("sma")
+
+            # Skip if RSI isn't ready
+            if pd.isna(rsi):
+                continue
+
+            # Manage active trade
+            active_trade, closed_trade = self._manage_active_trade(active_trade, timestamp, row)
+            if closed_trade:
+                trades.append(closed_trade)
+                long_triggered = False
+                short_triggered = False
+                continue
+
+            # Only enter new trades if we don't have an active one
+            if active_trade:
+                continue
+
+            # Long entry: RSI oversold (mean reversion bounce)
+            if not long_triggered and self.settings.trade_directions in ("long", "both"):
+                if rsi <= self.settings.rsi_oversold:
+                    # Optional SMA filter: only long if price is above SMA (trend filter)
+                    if self.settings.sma_period and (pd.isna(sma_value) or price < sma_value):
+                        continue
+
+                    risk_distance = self._compute_risk_distance(
+                        "long", price, row.get("atr"), row.get("swing_low"), row.get("swing_high")
+                    )
+                    if risk_distance is None or risk_distance <= 0:
+                        continue
+
+                    quantity = self._position_quantity(price)
+                    if quantity is None or quantity <= 0:
+                        continue
+
+                    entry_price = price
+                    stop_loss = entry_price - risk_distance
+                    take_profit = entry_price + self.settings.reward_multiple * risk_distance
+
+                    active_trade = Trade(
+                        symbol=self.symbol,
+                        direction="long",
+                        entry_time=timestamp,
+                        entry_price=entry_price,
+                        quantity=quantity,
+                        stop_loss=stop_loss,
+                        take_profit=take_profit,
+                        risk_value=risk_distance,
+                        risk_type=self.settings.stop_mode,
+                        notes=f"RSI mean reversion: oversold bounce (RSI={rsi:.1f})",
+                    )
+                    long_triggered = True
+                    continue
+
+            # Short entry: RSI overbought (mean reversion fade)
+            if not short_triggered and self.settings.trade_directions in ("short", "both"):
+                if rsi >= self.settings.rsi_overbought:
+                    # Optional SMA filter: only short if price is below SMA (trend filter)
+                    if self.settings.sma_period and (pd.isna(sma_value) or price > sma_value):
+                        continue
+
+                    risk_distance = self._compute_risk_distance(
+                        "short", price, row.get("atr"), row.get("swing_low"), row.get("swing_high")
+                    )
+                    if risk_distance is None or risk_distance <= 0:
+                        continue
+
+                    quantity = self._position_quantity(price)
+                    if quantity is None or quantity <= 0:
+                        continue
+
+                    entry_price = price
+                    stop_loss = entry_price + risk_distance
+                    take_profit = entry_price - self.settings.reward_multiple * risk_distance
+
+                    active_trade = Trade(
+                        symbol=self.symbol,
+                        direction="short",
+                        entry_time=timestamp,
+                        entry_price=entry_price,
+                        quantity=quantity,
+                        stop_loss=stop_loss,
+                        take_profit=take_profit,
+                        risk_value=risk_distance,
+                        risk_type=self.settings.stop_mode,
+                        notes=f"RSI mean reversion: overbought fade (RSI={rsi:.1f})",
+                    )
+                    short_triggered = True
+                    continue
+
+        # Close any remaining active trade at the end
+        if active_trade:
+            active_trade.exit_time = prepared.index[-1]
+            active_trade.exit_price = prepared.iloc[-1]["close"]
+            active_trade.exit_reason = "stop_loss"
+            trades.append(active_trade)
+
+        return trades
+
+
+class MovingAverageCrossoverStrategy(BaseStrategy):
+    """
+    Trend-following strategy using moving average crossovers.
+    
+    Enters long when fast EMA crosses above slow EMA (golden cross),
+    and enters short when fast EMA crosses below slow EMA (death cross).
+    """
+
+    def evaluate(self, frame: pd.DataFrame) -> List[Trade]:
+        prepared = self.prepare(frame)
+        
+        # Add EMAs
+        exponential_moving_average(
+            prepared,
+            period=self.settings.ema_fast_period,
+            column_name="ema_fast",
+        )
+        exponential_moving_average(
+            prepared,
+            period=self.settings.ema_slow_period,
+            column_name="ema_slow",
+        )
+        
+        trades: list[Trade] = []
+        active_trade: Optional[Trade] = None
+        prev_fast: Optional[float] = None
+        prev_slow: Optional[float] = None
+
+        for timestamp, row in prepared.iterrows():
+            price = row["close"]
+            ema_fast = row.get("ema_fast")
+            ema_slow = row.get("ema_slow")
+            sma_value = row.get("sma")
+
+            # Skip if EMAs aren't ready
+            if pd.isna(ema_fast) or pd.isna(ema_slow):
+                prev_fast = ema_fast
+                prev_slow = ema_slow
+                continue
+
+            # Manage active trade
+            active_trade, closed_trade = self._manage_active_trade(active_trade, timestamp, row)
+            if closed_trade:
+                trades.append(closed_trade)
+                continue
+
+            # Only enter new trades if we don't have an active one
+            if active_trade:
+                prev_fast = ema_fast
+                prev_slow = ema_slow
+                continue
+
+            # Detect crossover
+            if prev_fast is not None and prev_slow is not None:
+                # Golden cross: fast crosses above slow (bullish)
+                if (prev_fast <= prev_slow and ema_fast > ema_slow and 
+                    self.settings.trade_directions in ("long", "both")):
+                    # Optional SMA filter: only long if price is above SMA
+                    if self.settings.sma_period and (pd.isna(sma_value) or price < sma_value):
+                        prev_fast = ema_fast
+                        prev_slow = ema_slow
+                        continue
+
+                    risk_distance = self._compute_risk_distance(
+                        "long", price, row.get("atr"), row.get("swing_low"), row.get("swing_high")
+                    )
+                    if risk_distance is None or risk_distance <= 0:
+                        prev_fast = ema_fast
+                        prev_slow = ema_slow
+                        continue
+
+                    quantity = self._position_quantity(price)
+                    if quantity is None or quantity <= 0:
+                        prev_fast = ema_fast
+                        prev_slow = ema_slow
+                        continue
+
+                    entry_price = price
+                    stop_loss = entry_price - risk_distance
+                    take_profit = entry_price + self.settings.reward_multiple * risk_distance
+
+                    active_trade = Trade(
+                        symbol=self.symbol,
+                        direction="long",
+                        entry_time=timestamp,
+                        entry_price=entry_price,
+                        quantity=quantity,
+                        stop_loss=stop_loss,
+                        take_profit=take_profit,
+                        risk_value=risk_distance,
+                        risk_type=self.settings.stop_mode,
+                        notes=f"EMA crossover: golden cross (fast={ema_fast:.2f}, slow={ema_slow:.2f})",
+                    )
+                    prev_fast = ema_fast
+                    prev_slow = ema_slow
+                    continue
+
+                # Death cross: fast crosses below slow (bearish)
+                if (prev_fast >= prev_slow and ema_fast < ema_slow and 
+                    self.settings.trade_directions in ("short", "both")):
+                    # Optional SMA filter: only short if price is below SMA
+                    if self.settings.sma_period and (pd.isna(sma_value) or price > sma_value):
+                        prev_fast = ema_fast
+                        prev_slow = ema_slow
+                        continue
+
+                    risk_distance = self._compute_risk_distance(
+                        "short", price, row.get("atr"), row.get("swing_low"), row.get("swing_high")
+                    )
+                    if risk_distance is None or risk_distance <= 0:
+                        prev_fast = ema_fast
+                        prev_slow = ema_slow
+                        continue
+
+                    quantity = self._position_quantity(price)
+                    if quantity is None or quantity <= 0:
+                        prev_fast = ema_fast
+                        prev_slow = ema_slow
+                        continue
+
+                    entry_price = price
+                    stop_loss = entry_price + risk_distance
+                    take_profit = entry_price - self.settings.reward_multiple * risk_distance
+
+                    active_trade = Trade(
+                        symbol=self.symbol,
+                        direction="short",
+                        entry_time=timestamp,
+                        entry_price=entry_price,
+                        quantity=quantity,
+                        stop_loss=stop_loss,
+                        take_profit=take_profit,
+                        risk_value=risk_distance,
+                        risk_type=self.settings.stop_mode,
+                        notes=f"EMA crossover: death cross (fast={ema_fast:.2f}, slow={ema_slow:.2f})",
+                    )
+                    prev_fast = ema_fast
+                    prev_slow = ema_slow
+                    continue
+
+            prev_fast = ema_fast
+            prev_slow = ema_slow
+
+        # Close any remaining active trade at the end
+        if active_trade:
+            active_trade.exit_time = prepared.index[-1]
+            active_trade.exit_price = prepared.iloc[-1]["close"]
+            active_trade.exit_reason = "stop_loss"
+            trades.append(active_trade)
+
+        return trades
+
+
+class VolumeBreakoutStrategy(BaseStrategy):
+    """
+    Breakout strategy with volume confirmation.
+    
+    Enters long when price breaks above recent high with volume above average,
+    and enters short when price breaks below recent low with volume above average.
+    Uses volume spikes to confirm breakouts.
+    """
+
+    def evaluate(self, frame: pd.DataFrame) -> List[Trade]:
+        prepared = self.prepare(frame)
+        
+        # Add volume moving average
+        if "volume" not in prepared.columns:
+            # If no volume data, skip this strategy
+            return []
+        
+        volume_moving_average(
+            prepared,
+            period=self.settings.volume_ma_period,
+            column_name="volume_ma",
+        )
+        
+        trades: list[Trade] = []
+        active_trade: Optional[Trade] = None
+        
+        # Track recent highs and lows for breakout detection
+        lookback_period = max(20, self.settings.volume_ma_period)
+        prepared["recent_high"] = prepared["high"].rolling(window=lookback_period, min_periods=lookback_period).max()
+        prepared["recent_low"] = prepared["low"].rolling(window=lookback_period, min_periods=lookback_period).min()
+
+        for timestamp, row in prepared.iterrows():
+            price = row["close"]
+            volume = row.get("volume", 0)
+            volume_ma = row.get("volume_ma")
+            recent_high = row.get("recent_high")
+            recent_low = row.get("recent_low")
+            sma_value = row.get("sma")
+
+            # Skip if indicators aren't ready
+            if pd.isna(volume_ma) or pd.isna(recent_high) or pd.isna(recent_low):
+                continue
+
+            # Manage active trade
+            active_trade, closed_trade = self._manage_active_trade(active_trade, timestamp, row)
+            if closed_trade:
+                trades.append(closed_trade)
+                continue
+
+            # Only enter new trades if we don't have an active one
+            if active_trade:
+                continue
+
+            # Long entry: price breaks above recent high with volume confirmation
+            if self.settings.trade_directions in ("long", "both"):
+                if row["high"] > recent_high and volume >= volume_ma * self.settings.volume_multiplier:
+                    # Optional SMA filter: only long if price is above SMA
+                    if self.settings.sma_period and (pd.isna(sma_value) or price < sma_value):
+                        continue
+
+                    risk_distance = self._compute_risk_distance(
+                        "long", price, row.get("atr"), row.get("swing_low"), row.get("swing_high")
+                    )
+                    if risk_distance is None or risk_distance <= 0:
+                        continue
+
+                    quantity = self._position_quantity(price)
+                    if quantity is None or quantity <= 0:
+                        continue
+
+                    entry_price = price
+                    stop_loss = entry_price - risk_distance
+                    take_profit = entry_price + self.settings.reward_multiple * risk_distance
+
+                    active_trade = Trade(
+                        symbol=self.symbol,
+                        direction="long",
+                        entry_time=timestamp,
+                        entry_price=entry_price,
+                        quantity=quantity,
+                        stop_loss=stop_loss,
+                        take_profit=take_profit,
+                        risk_value=risk_distance,
+                        risk_type=self.settings.stop_mode,
+                        notes=f"Volume breakout: above {recent_high:.2f} (vol={volume:.0f}, avg={volume_ma:.0f})",
+                    )
+                    continue
+
+            # Short entry: price breaks below recent low with volume confirmation
+            if self.settings.trade_directions in ("short", "both"):
+                if row["low"] < recent_low and volume >= volume_ma * self.settings.volume_multiplier:
+                    # Optional SMA filter: only short if price is below SMA
+                    if self.settings.sma_period and (pd.isna(sma_value) or price > sma_value):
+                        continue
+
+                    risk_distance = self._compute_risk_distance(
+                        "short", price, row.get("atr"), row.get("swing_low"), row.get("swing_high")
+                    )
+                    if risk_distance is None or risk_distance <= 0:
+                        continue
+
+                    quantity = self._position_quantity(price)
+                    if quantity is None or quantity <= 0:
+                        continue
+
+                    entry_price = price
+                    stop_loss = entry_price + risk_distance
+                    take_profit = entry_price - self.settings.reward_multiple * risk_distance
+
+                    active_trade = Trade(
+                        symbol=self.symbol,
+                        direction="short",
+                        entry_time=timestamp,
+                        entry_price=entry_price,
+                        quantity=quantity,
+                        stop_loss=stop_loss,
+                        take_profit=take_profit,
+                        risk_value=risk_distance,
+                        risk_type=self.settings.stop_mode,
+                        notes=f"Volume breakout: below {recent_low:.2f} (vol={volume:.0f}, avg={volume_ma:.0f})",
+                    )
+                    continue
+
+        # Close any remaining active trade at the end
+        if active_trade:
+            active_trade.exit_time = prepared.index[-1]
+            active_trade.exit_price = prepared.iloc[-1]["close"]
             active_trade.exit_reason = "stop_loss"
             trades.append(active_trade)
 

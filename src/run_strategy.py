@@ -13,12 +13,16 @@ from .binance_client import BinanceConfig
 from .data_fetcher import fetch_ohlcv_dataframe
 from .backtester import Backtester
 from .strategy import (
+    BollingerBandsMeanReversionStrategy,
     IntradayRangeStrategy,
     MomentumBreakoutStrategy,
+    MovingAverageCrossoverStrategy,
+    RSIMeanReversionStrategy,
     StopMode,
     StrategySettings,
     Trade,
     TradePreference,
+    VolumeBreakoutStrategy,
 )
 def apply_trading_cost(trade: Trade, trading_cost: float) -> Trade:
     if trading_cost <= 0:
@@ -46,7 +50,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--strategy",
-        choices=["intraday_range", "momentum"],
+        choices=["intraday_range", "momentum", "bollinger_reversion", "rsi_reversion", "ma_crossover", "volume_breakout"],
         default="intraday_range",
         help="Choose which strategy to evaluate.",
     )
@@ -143,6 +147,60 @@ def parse_args() -> argparse.Namespace:
         help="Limit trades to long-only, short-only, or both directions.",
     )
     parser.add_argument(
+        "--bb-period",
+        type=int,
+        default=20,
+        help="Bollinger Bands period (only for bollinger_reversion strategy).",
+    )
+    parser.add_argument(
+        "--bb-std",
+        type=float,
+        default=2.0,
+        help="Bollinger Bands standard deviation multiplier (only for bollinger_reversion strategy).",
+    )
+    parser.add_argument(
+        "--rsi-period",
+        type=int,
+        default=14,
+        help="RSI lookback period (only for rsi_reversion strategy).",
+    )
+    parser.add_argument(
+        "--rsi-oversold",
+        type=float,
+        default=30.0,
+        help="RSI oversold threshold for long entries (only for rsi_reversion strategy).",
+    )
+    parser.add_argument(
+        "--rsi-overbought",
+        type=float,
+        default=70.0,
+        help="RSI overbought threshold for short entries (only for rsi_reversion strategy).",
+    )
+    parser.add_argument(
+        "--ema-fast",
+        type=int,
+        default=12,
+        help="Fast EMA period (only for ma_crossover strategy).",
+    )
+    parser.add_argument(
+        "--ema-slow",
+        type=int,
+        default=26,
+        help="Slow EMA period (only for ma_crossover strategy).",
+    )
+    parser.add_argument(
+        "--volume-ma-period",
+        type=int,
+        default=20,
+        help="Volume moving average period (only for volume_breakout strategy).",
+    )
+    parser.add_argument(
+        "--volume-multiplier",
+        type=float,
+        default=1.5,
+        help="Volume multiplier threshold for breakout confirmation (only for volume_breakout strategy).",
+    )
+    parser.add_argument(
         "--testnet",
         action="store_true",
         help="Use Binance testnet (public data still comes from production).",
@@ -215,9 +273,32 @@ def main() -> None:
         trade_directions=cast(TradePreference, args.trade_directions),
         capital_base=args.initial_capital,
         position_fraction=args.position_fraction,
+        bb_period=args.bb_period,
+        bb_std=args.bb_std,
+        rsi_period=args.rsi_period,
+        rsi_oversold=args.rsi_oversold,
+        rsi_overbought=args.rsi_overbought,
+        ema_fast_period=args.ema_fast,
+        ema_slow_period=args.ema_slow,
+        volume_ma_period=args.volume_ma_period,
+        volume_multiplier=args.volume_multiplier,
     )
     settings_kwargs = asdict(base_settings)
-    strategy_cls = IntradayRangeStrategy if args.strategy == "intraday_range" else MomentumBreakoutStrategy
+    
+    if args.strategy == "intraday_range":
+        strategy_cls = IntradayRangeStrategy
+    elif args.strategy == "momentum":
+        strategy_cls = MomentumBreakoutStrategy
+    elif args.strategy == "bollinger_reversion":
+        strategy_cls = BollingerBandsMeanReversionStrategy
+    elif args.strategy == "rsi_reversion":
+        strategy_cls = RSIMeanReversionStrategy
+    elif args.strategy == "ma_crossover":
+        strategy_cls = MovingAverageCrossoverStrategy
+    elif args.strategy == "volume_breakout":
+        strategy_cls = VolumeBreakoutStrategy
+    else:
+        raise SystemExit(f"Unknown strategy: {args.strategy}")
 
     all_trades: list[Trade] = []
     for symbol in symbols:

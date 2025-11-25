@@ -32,6 +32,7 @@ from tqdm import tqdm
 import ccxt
 import sys
 from pathlib import Path
+import matplotlib.pyplot as plt
 
 # Add parent directory to path to allow imports when running from src/
 parent_dir = Path(__file__).parent.parent
@@ -604,6 +605,104 @@ if __name__ == '__main__':
             short_win_rate = (short_ret_asset > 0).sum() / len(short_ret_asset) if len(short_ret_asset) > 0 else 0
             print(f"  As SHORT: {perf['short_return']:.2%} total return, {short_ann_ret:.2%} annualized, "
                   f"{short_win_rate:.2%} win rate over {perf['short_days']} days")
+
+    # Calculate buy-and-hold BTC/USDT performance
+    print("\n" + "=" * 80)
+    print("CALCULATING BUY-AND-HOLD BTC/USDT COMPARISON")
+    print("=" * 80)
+    
+    btc_symbol = f"BTC/{QUOTE_CURRENCY}"
+    btc_prices = None
+    
+    # Try to get BTC prices from the prices DataFrame
+    if btc_symbol in prices.columns:
+        btc_prices = prices[btc_symbol]
+        print(f"Using BTC prices from backtest data")
+    else:
+        # Fetch BTC prices if not in the data
+        print(f"Fetching BTC prices for comparison...")
+        try:
+            btc_start_dt = pd.to_datetime(START_DATE).tz_localize('UTC')
+            btc_end_dt = pd.to_datetime(END_DATE).tz_localize('UTC')
+            btc_df = fetch_coin_timeseries(btc_symbol, btc_start_dt, btc_end_dt)
+            if not btc_df.empty:
+                btc_daily = daily_from_timeseries(btc_df)
+                # Align with results index
+                all_dates_btc = pd.date_range(start=btc_start_dt.normalize(), end=btc_end_dt.normalize(), freq='D', tz='UTC')
+                btc_prices = btc_daily['price'].reindex(all_dates_btc).ffill()
+                btc_prices = btc_prices.reindex(results.index).ffill()
+            else:
+                print("Warning: Could not fetch BTC prices")
+        except Exception as e:
+            print(f"Warning: Could not fetch BTC prices: {e}")
+    
+    # Calculate buy-and-hold equity curve
+    if btc_prices is not None and len(btc_prices) > 0:
+        # Remove NaN values and align with results
+        btc_prices_clean = btc_prices.dropna()
+        if len(btc_prices_clean) > 0:
+            # Calculate buy-and-hold returns
+            btc_initial_price = btc_prices_clean.iloc[0]
+            btc_equity = (btc_prices_clean / btc_initial_price) * INITIAL_CAPITAL
+            
+            # Align with results index
+            btc_equity_aligned = btc_equity.reindex(results.index).ffill()
+            
+            # Calculate buy-and-hold metrics
+            btc_total_return = (btc_equity_aligned.iloc[-1] / INITIAL_CAPITAL) - 1
+            btc_ann_return = (1 + btc_total_return) ** (365.0 / len(results)) - 1
+            
+            print(f"\nBuy-and-Hold BTC/{QUOTE_CURRENCY}:")
+            print(f"  Initial: ${INITIAL_CAPITAL:,.2f}")
+            print(f"  Final: ${btc_equity_aligned.iloc[-1]:,.2f}")
+            print(f"  Total return: {btc_total_return:.2%}")
+            print(f"  Annualized return: {btc_ann_return:.2%}")
+            print(f"  Multiple: {btc_equity_aligned.iloc[-1] / INITIAL_CAPITAL:.2f}x")
+            
+            # Plot equity curves
+            print("\n" + "=" * 80)
+            print("GENERATING EQUITY CURVE PLOT")
+            print("=" * 80)
+            
+            plt.figure(figsize=(14, 8))
+            plt.plot(results.index, results['portfolio_value'], label='Strategy', linewidth=2, color='blue')
+            plt.plot(btc_equity_aligned.index, btc_equity_aligned.values, label=f'Buy-and-Hold BTC/{QUOTE_CURRENCY}', linewidth=2, color='orange', linestyle='--')
+            plt.xlabel('Date', fontsize=12)
+            plt.ylabel('Portfolio Value ($)', fontsize=12)
+            plt.title('Equity Curve: Strategy vs Buy-and-Hold BTC', fontsize=14, fontweight='bold')
+            plt.legend(fontsize=11)
+            plt.grid(True, alpha=0.3)
+            plt.yscale('log')  # Use log scale for better visualization
+            
+            # Format x-axis dates
+            plt.gcf().autofmt_xdate()
+            
+            # Add text box with key metrics
+            strategy_final = results['portfolio_value'].iloc[-1]
+            btc_final = btc_equity_aligned.iloc[-1]
+            textstr = f'Strategy: ${strategy_final:,.0f} ({total_return:.1%})\n'
+            textstr += f'BTC B&H: ${btc_final:,.0f} ({btc_total_return:.1%})'
+            props = dict(boxstyle='round', facecolor='wheat', alpha=0.5)
+            plt.text(0.02, 0.98, textstr, transform=plt.gca().transAxes, fontsize=10,
+                    verticalalignment='top', bbox=props)
+            
+            # Save plot
+            plot_filename = 'equity_curve_comparison.png'
+            plt.tight_layout()
+            plt.savefig(plot_filename, dpi=300, bbox_inches='tight')
+            print(f"Saved equity curve plot: {plot_filename}")
+            
+            # Show plot
+            try:
+                plt.show()
+            except:
+                print("(Plot display not available in this environment)")
+            
+            plt.close()
+        else:
+            print("Warning: No valid BTC price data for comparison")
+    else:
+        print("Warning: Could not calculate buy-and-hold comparison (BTC data not available)")
 
     # Save results
     results.to_csv('backtest_results.csv')

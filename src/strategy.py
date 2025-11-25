@@ -11,13 +11,16 @@ from typing import List, Literal, Optional, Tuple
 import pandas as pd
 
 from .indicators import (
+    average_directional_index,
     average_true_range,
     bollinger_bands,
     exponential_moving_average,
     macd,
     relative_strength_index,
     simple_moving_average,
+    stochastic_oscillator,
     volume_moving_average,
+    williams_r,
 )
 
 TradeDirection = Literal["long", "short"]
@@ -55,6 +58,15 @@ class StrategySettings:
     macd_signal_period: int = 9
     volume_ma_period: int = 20
     volume_multiplier: float = 1.5
+    stoch_k_period: int = 14
+    stoch_d_period: int = 3
+    stoch_oversold: float = 20.0
+    stoch_overbought: float = 80.0
+    adx_period: int = 14
+    adx_threshold: float = 25.0
+    willr_period: int = 14
+    willr_oversold: float = -80.0
+    willr_overbought: float = -20.0
 
 
 @dataclass
@@ -988,6 +1000,419 @@ class VolumeBreakoutStrategy(BaseStrategy):
                         risk_value=risk_distance,
                         risk_type=self.settings.stop_mode,
                         notes=f"Volume breakout: below {recent_low:.2f} (vol={volume:.0f}, avg={volume_ma:.0f})",
+                    )
+                    continue
+
+        # Close any remaining active trade at the end
+        if active_trade:
+            active_trade.exit_time = prepared.index[-1]
+            active_trade.exit_price = prepared.iloc[-1]["close"]
+            active_trade.exit_reason = "stop_loss"
+            trades.append(active_trade)
+
+        return trades
+
+
+class StochasticOscillatorStrategy(BaseStrategy):
+    """
+    Mean reversion strategy using Stochastic Oscillator.
+    
+    Enters long when Stochastic %K drops below oversold threshold (typically <20),
+    and enters short when Stochastic %K rises above overbought threshold (typically >80).
+    Uses %D (smoothed %K) for confirmation.
+    """
+
+    def evaluate(self, frame: pd.DataFrame) -> List[Trade]:
+        prepared = self.prepare(frame)
+        
+        # Add Stochastic Oscillator
+        stochastic_oscillator(
+            prepared,
+            k_period=self.settings.stoch_k_period,
+            d_period=self.settings.stoch_d_period,
+            k_column="stoch_k",
+            d_column="stoch_d",
+        )
+        
+        trades: list[Trade] = []
+        active_trade: Optional[Trade] = None
+        long_triggered = False
+        short_triggered = False
+
+        for timestamp, row in prepared.iterrows():
+            price = row["close"]
+            stoch_k = row.get("stoch_k")
+            stoch_d = row.get("stoch_d")
+            sma_value = row.get("sma")
+
+            # Skip if Stochastic isn't ready
+            if pd.isna(stoch_k) or pd.isna(stoch_d):
+                continue
+
+            # Manage active trade
+            active_trade, closed_trade = self._manage_active_trade(active_trade, timestamp, row)
+            if closed_trade:
+                trades.append(closed_trade)
+                long_triggered = False
+                short_triggered = False
+                continue
+
+            # Only enter new trades if we don't have an active one
+            if active_trade:
+                continue
+
+            # Long entry: Stochastic oversold (mean reversion bounce)
+            if not long_triggered and self.settings.trade_directions in ("long", "both"):
+                if stoch_k <= self.settings.stoch_oversold and stoch_d <= self.settings.stoch_oversold:
+                    # Optional SMA filter: only long if price is above SMA (trend filter)
+                    if self.settings.sma_period and (pd.isna(sma_value) or price < sma_value):
+                        continue
+
+                    risk_distance = self._compute_risk_distance(
+                        "long", price, row.get("atr"), row.get("swing_low"), row.get("swing_high")
+                    )
+                    if risk_distance is None or risk_distance <= 0:
+                        continue
+
+                    quantity = self._position_quantity(price)
+                    if quantity is None or quantity <= 0:
+                        continue
+
+                    entry_price = price
+                    stop_loss = entry_price - risk_distance
+                    take_profit = entry_price + self.settings.reward_multiple * risk_distance
+
+                    active_trade = Trade(
+                        symbol=self.symbol,
+                        direction="long",
+                        entry_time=timestamp,
+                        entry_price=entry_price,
+                        quantity=quantity,
+                        stop_loss=stop_loss,
+                        take_profit=take_profit,
+                        risk_value=risk_distance,
+                        risk_type=self.settings.stop_mode,
+                        notes=f"Stochastic oversold: %K={stoch_k:.1f}, %D={stoch_d:.1f}",
+                    )
+                    long_triggered = True
+                    continue
+
+            # Short entry: Stochastic overbought (mean reversion fade)
+            if not short_triggered and self.settings.trade_directions in ("short", "both"):
+                if stoch_k >= self.settings.stoch_overbought and stoch_d >= self.settings.stoch_overbought:
+                    # Optional SMA filter: only short if price is below SMA (trend filter)
+                    if self.settings.sma_period and (pd.isna(sma_value) or price > sma_value):
+                        continue
+
+                    risk_distance = self._compute_risk_distance(
+                        "short", price, row.get("atr"), row.get("swing_low"), row.get("swing_high")
+                    )
+                    if risk_distance is None or risk_distance <= 0:
+                        continue
+
+                    quantity = self._position_quantity(price)
+                    if quantity is None or quantity <= 0:
+                        continue
+
+                    entry_price = price
+                    stop_loss = entry_price + risk_distance
+                    take_profit = entry_price - self.settings.reward_multiple * risk_distance
+
+                    active_trade = Trade(
+                        symbol=self.symbol,
+                        direction="short",
+                        entry_time=timestamp,
+                        entry_price=entry_price,
+                        quantity=quantity,
+                        stop_loss=stop_loss,
+                        take_profit=take_profit,
+                        risk_value=risk_distance,
+                        risk_type=self.settings.stop_mode,
+                        notes=f"Stochastic overbought: %K={stoch_k:.1f}, %D={stoch_d:.1f}",
+                    )
+                    short_triggered = True
+                    continue
+
+        # Close any remaining active trade at the end
+        if active_trade:
+            active_trade.exit_time = prepared.index[-1]
+            active_trade.exit_price = prepared.iloc[-1]["close"]
+            active_trade.exit_reason = "stop_loss"
+            trades.append(active_trade)
+
+        return trades
+
+
+class MACDCrossoverStrategy(BaseStrategy):
+    """
+    Trend-following strategy using MACD signal line crossovers.
+    
+    Enters long when MACD line crosses above signal line (bullish crossover),
+    and enters short when MACD line crosses below signal line (bearish crossover).
+    """
+
+    def evaluate(self, frame: pd.DataFrame) -> List[Trade]:
+        prepared = self.prepare(frame)
+        
+        # Add MACD
+        macd(
+            prepared,
+            fast_period=self.settings.macd_fast_period,
+            slow_period=self.settings.macd_slow_period,
+            signal_period=self.settings.macd_signal_period,
+            macd_column="macd",
+            signal_column="macd_signal",
+            histogram_column="macd_histogram",
+        )
+        
+        trades: list[Trade] = []
+        active_trade: Optional[Trade] = None
+        prev_macd: Optional[float] = None
+        prev_signal: Optional[float] = None
+
+        for timestamp, row in prepared.iterrows():
+            price = row["close"]
+            macd_line = row.get("macd")
+            macd_signal = row.get("macd_signal")
+            sma_value = row.get("sma")
+
+            # Skip if MACD isn't ready
+            if pd.isna(macd_line) or pd.isna(macd_signal):
+                prev_macd = macd_line
+                prev_signal = macd_signal
+                continue
+
+            # Manage active trade
+            active_trade, closed_trade = self._manage_active_trade(active_trade, timestamp, row)
+            if closed_trade:
+                trades.append(closed_trade)
+                continue
+
+            # Only enter new trades if we don't have an active one
+            if active_trade:
+                prev_macd = macd_line
+                prev_signal = macd_signal
+                continue
+
+            # Detect crossover
+            if prev_macd is not None and prev_signal is not None:
+                # Bullish crossover: MACD crosses above signal
+                if (prev_macd <= prev_signal and macd_line > macd_signal and 
+                    self.settings.trade_directions in ("long", "both")):
+                    # Optional SMA filter: only long if price is above SMA
+                    if self.settings.sma_period and (pd.isna(sma_value) or price < sma_value):
+                        prev_macd = macd_line
+                        prev_signal = macd_signal
+                        continue
+
+                    risk_distance = self._compute_risk_distance(
+                        "long", price, row.get("atr"), row.get("swing_low"), row.get("swing_high")
+                    )
+                    if risk_distance is None or risk_distance <= 0:
+                        prev_macd = macd_line
+                        prev_signal = macd_signal
+                        continue
+
+                    quantity = self._position_quantity(price)
+                    if quantity is None or quantity <= 0:
+                        prev_macd = macd_line
+                        prev_signal = macd_signal
+                        continue
+
+                    entry_price = price
+                    stop_loss = entry_price - risk_distance
+                    take_profit = entry_price + self.settings.reward_multiple * risk_distance
+
+                    active_trade = Trade(
+                        symbol=self.symbol,
+                        direction="long",
+                        entry_time=timestamp,
+                        entry_price=entry_price,
+                        quantity=quantity,
+                        stop_loss=stop_loss,
+                        take_profit=take_profit,
+                        risk_value=risk_distance,
+                        risk_type=self.settings.stop_mode,
+                        notes=f"MACD bullish crossover: MACD={macd_line:.2f}, Signal={macd_signal:.2f}",
+                    )
+                    prev_macd = macd_line
+                    prev_signal = macd_signal
+                    continue
+
+                # Bearish crossover: MACD crosses below signal
+                if (prev_macd >= prev_signal and macd_line < macd_signal and 
+                    self.settings.trade_directions in ("short", "both")):
+                    # Optional SMA filter: only short if price is below SMA
+                    if self.settings.sma_period and (pd.isna(sma_value) or price > sma_value):
+                        prev_macd = macd_line
+                        prev_signal = macd_signal
+                        continue
+
+                    risk_distance = self._compute_risk_distance(
+                        "short", price, row.get("atr"), row.get("swing_low"), row.get("swing_high")
+                    )
+                    if risk_distance is None or risk_distance <= 0:
+                        prev_macd = macd_line
+                        prev_signal = macd_signal
+                        continue
+
+                    quantity = self._position_quantity(price)
+                    if quantity is None or quantity <= 0:
+                        prev_macd = macd_line
+                        prev_signal = macd_signal
+                        continue
+
+                    entry_price = price
+                    stop_loss = entry_price + risk_distance
+                    take_profit = entry_price - self.settings.reward_multiple * risk_distance
+
+                    active_trade = Trade(
+                        symbol=self.symbol,
+                        direction="short",
+                        entry_time=timestamp,
+                        entry_price=entry_price,
+                        quantity=quantity,
+                        stop_loss=stop_loss,
+                        take_profit=take_profit,
+                        risk_value=risk_distance,
+                        risk_type=self.settings.stop_mode,
+                        notes=f"MACD bearish crossover: MACD={macd_line:.2f}, Signal={macd_signal:.2f}",
+                    )
+                    prev_macd = macd_line
+                    prev_signal = macd_signal
+                    continue
+
+            prev_macd = macd_line
+            prev_signal = macd_signal
+
+        # Close any remaining active trade at the end
+        if active_trade:
+            active_trade.exit_time = prepared.index[-1]
+            active_trade.exit_price = prepared.iloc[-1]["close"]
+            active_trade.exit_reason = "stop_loss"
+            trades.append(active_trade)
+
+        return trades
+
+
+class ADXTrendStrengthStrategy(BaseStrategy):
+    """
+    Trend-following strategy using ADX (Average Directional Index) for trend strength confirmation.
+    
+    Enters long when price is above EMA and ADX shows strong trend (ADX > threshold),
+    and enters short when price is below EMA and ADX shows strong trend.
+    Only trades when trend strength is confirmed by ADX.
+    """
+
+    def evaluate(self, frame: pd.DataFrame) -> List[Trade]:
+        prepared = self.prepare(frame)
+        
+        # Add ADX and EMA for trend direction
+        average_directional_index(
+            prepared,
+            period=self.settings.adx_period,
+            column_name="adx",
+        )
+        exponential_moving_average(
+            prepared,
+            period=self.settings.ema_slow_period,
+            column_name="ema_trend",
+        )
+        
+        trades: list[Trade] = []
+        active_trade: Optional[Trade] = None
+
+        for timestamp, row in prepared.iterrows():
+            price = row["close"]
+            adx = row.get("adx")
+            ema_trend = row.get("ema_trend")
+            sma_value = row.get("sma")
+
+            # Skip if indicators aren't ready
+            if pd.isna(adx) or pd.isna(ema_trend):
+                continue
+
+            # Manage active trade
+            active_trade, closed_trade = self._manage_active_trade(active_trade, timestamp, row)
+            if closed_trade:
+                trades.append(closed_trade)
+                continue
+
+            # Only enter new trades if we don't have an active one
+            if active_trade:
+                continue
+
+            # Only trade when ADX shows strong trend
+            if adx < self.settings.adx_threshold:
+                continue
+
+            # Long entry: price above EMA with strong ADX (uptrend)
+            if self.settings.trade_directions in ("long", "both"):
+                if price > ema_trend:
+                    # Optional SMA filter: only long if price is above SMA
+                    if self.settings.sma_period and (pd.isna(sma_value) or price < sma_value):
+                        continue
+
+                    risk_distance = self._compute_risk_distance(
+                        "long", price, row.get("atr"), row.get("swing_low"), row.get("swing_high")
+                    )
+                    if risk_distance is None or risk_distance <= 0:
+                        continue
+
+                    quantity = self._position_quantity(price)
+                    if quantity is None or quantity <= 0:
+                        continue
+
+                    entry_price = price
+                    stop_loss = entry_price - risk_distance
+                    take_profit = entry_price + self.settings.reward_multiple * risk_distance
+
+                    active_trade = Trade(
+                        symbol=self.symbol,
+                        direction="long",
+                        entry_time=timestamp,
+                        entry_price=entry_price,
+                        quantity=quantity,
+                        stop_loss=stop_loss,
+                        take_profit=take_profit,
+                        risk_value=risk_distance,
+                        risk_type=self.settings.stop_mode,
+                        notes=f"ADX trend strength: ADX={adx:.1f}, price above EMA {ema_trend:.2f}",
+                    )
+                    continue
+
+            # Short entry: price below EMA with strong ADX (downtrend)
+            if self.settings.trade_directions in ("short", "both"):
+                if price < ema_trend:
+                    # Optional SMA filter: only short if price is below SMA
+                    if self.settings.sma_period and (pd.isna(sma_value) or price > sma_value):
+                        continue
+
+                    risk_distance = self._compute_risk_distance(
+                        "short", price, row.get("atr"), row.get("swing_low"), row.get("swing_high")
+                    )
+                    if risk_distance is None or risk_distance <= 0:
+                        continue
+
+                    quantity = self._position_quantity(price)
+                    if quantity is None or quantity <= 0:
+                        continue
+
+                    entry_price = price
+                    stop_loss = entry_price + risk_distance
+                    take_profit = entry_price - self.settings.reward_multiple * risk_distance
+
+                    active_trade = Trade(
+                        symbol=self.symbol,
+                        direction="short",
+                        entry_time=timestamp,
+                        entry_price=entry_price,
+                        quantity=quantity,
+                        stop_loss=stop_loss,
+                        take_profit=take_profit,
+                        risk_value=risk_distance,
+                        risk_type=self.settings.stop_mode,
+                        notes=f"ADX trend strength: ADX={adx:.1f}, price below EMA {ema_trend:.2f}",
                     )
                     continue
 

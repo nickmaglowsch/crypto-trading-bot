@@ -13,12 +13,15 @@ from .binance_client import BinanceConfig
 from .data_fetcher import fetch_ohlcv_dataframe
 from .backtester import Backtester
 from .strategy import (
+    ADXTrendStrengthStrategy,
     BollingerBandsMeanReversionStrategy,
     IntradayRangeStrategy,
+    MACDCrossoverStrategy,
     MomentumBreakoutStrategy,
     MovingAverageCrossoverStrategy,
     RSIMeanReversionStrategy,
     StopMode,
+    StochasticOscillatorStrategy,
     StrategySettings,
     Trade,
     TradePreference,
@@ -50,7 +53,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--strategy",
-        choices=["intraday_range", "momentum", "bollinger_reversion", "rsi_reversion", "ma_crossover", "volume_breakout"],
+        choices=["intraday_range", "momentum", "bollinger_reversion", "rsi_reversion", "ma_crossover", "volume_breakout", "stochastic", "macd_crossover", "adx_trend"],
         default="intraday_range",
         help="Choose which strategy to evaluate.",
     )
@@ -201,6 +204,42 @@ def parse_args() -> argparse.Namespace:
         help="Volume multiplier threshold for breakout confirmation (only for volume_breakout strategy).",
     )
     parser.add_argument(
+        "--stoch-k-period",
+        type=int,
+        default=14,
+        help="Stochastic %K period (only for stochastic strategy).",
+    )
+    parser.add_argument(
+        "--stoch-d-period",
+        type=int,
+        default=3,
+        help="Stochastic %D smoothing period (only for stochastic strategy).",
+    )
+    parser.add_argument(
+        "--stoch-oversold",
+        type=float,
+        default=20.0,
+        help="Stochastic oversold threshold for long entries (only for stochastic strategy).",
+    )
+    parser.add_argument(
+        "--stoch-overbought",
+        type=float,
+        default=80.0,
+        help="Stochastic overbought threshold for short entries (only for stochastic strategy).",
+    )
+    parser.add_argument(
+        "--adx-period",
+        type=int,
+        default=14,
+        help="ADX lookback period (only for adx_trend strategy).",
+    )
+    parser.add_argument(
+        "--adx-threshold",
+        type=float,
+        default=25.0,
+        help="ADX threshold for trend strength confirmation (only for adx_trend strategy).",
+    )
+    parser.add_argument(
         "--testnet",
         action="store_true",
         help="Use Binance testnet (public data still comes from production).",
@@ -282,6 +321,12 @@ def main() -> None:
         ema_slow_period=args.ema_slow,
         volume_ma_period=args.volume_ma_period,
         volume_multiplier=args.volume_multiplier,
+        stoch_k_period=args.stoch_k_period,
+        stoch_d_period=args.stoch_d_period,
+        stoch_oversold=args.stoch_oversold,
+        stoch_overbought=args.stoch_overbought,
+        adx_period=args.adx_period,
+        adx_threshold=args.adx_threshold,
     )
     settings_kwargs = asdict(base_settings)
     
@@ -297,6 +342,12 @@ def main() -> None:
         strategy_cls = MovingAverageCrossoverStrategy
     elif args.strategy == "volume_breakout":
         strategy_cls = VolumeBreakoutStrategy
+    elif args.strategy == "stochastic":
+        strategy_cls = StochasticOscillatorStrategy
+    elif args.strategy == "macd_crossover":
+        strategy_cls = MACDCrossoverStrategy
+    elif args.strategy == "adx_trend":
+        strategy_cls = ADXTrendStrengthStrategy
     else:
         raise SystemExit(f"Unknown strategy: {args.strategy}")
 

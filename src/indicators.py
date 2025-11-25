@@ -253,3 +253,109 @@ def volume_moving_average(
         frame[column_name] = volume_ma
     
     return volume_ma if volume_ma is not None else pd.Series(dtype=float, index=frame.index)
+
+
+def stochastic_oscillator(
+    frame: pd.DataFrame,
+    *,
+    k_period: int = 14,
+    d_period: int = 3,
+    k_column: str = "stoch_k",
+    d_column: str = "stoch_d",
+) -> pd.DataFrame:
+    """
+    Compute Stochastic Oscillator (%K and %D) using pandas-ta.
+
+    Parameters
+    ----------
+    frame:
+        DataFrame with ``high``, ``low`` and ``close`` columns.
+    k_period:
+        %K lookback period.
+    d_period:
+        %D smoothing period (moving average of %K).
+    k_column:
+        Column name for %K.
+    d_column:
+        Column name for %D.
+    """
+    stoch = frame.ta.stoch(k=k_period, d=d_period)
+    
+    if stoch is not None and not stoch.empty:
+        # pandas-ta returns DataFrame with columns like 'STOCHk_14_3_3', 'STOCHd_14_3_3'
+        stoch_cols = stoch.columns.tolist()
+        k_col = next((c for c in stoch_cols if 'k' in c.lower() and 'd' not in c.lower()), None)
+        d_col = next((c for c in stoch_cols if 'd' in c.lower()), None)
+        
+        if k_col and d_col:
+            frame[k_column] = stoch[k_col]
+            frame[d_column] = stoch[d_col]
+        elif len(stoch_cols) >= 2:
+            # Fallback: use column order
+            frame[k_column] = stoch.iloc[:, 0]
+            frame[d_column] = stoch.iloc[:, 1]
+    
+    return frame
+
+
+def average_directional_index(
+    frame: pd.DataFrame,
+    *,
+    period: int = 14,
+    column_name: str = "adx",
+) -> pd.Series:
+    """
+    Compute Average Directional Index (ADX) using pandas-ta.
+
+    Parameters
+    ----------
+    frame:
+        DataFrame with ``high``, ``low`` and ``close`` columns.
+    period:
+        ADX lookback period.
+    column_name:
+        Column name for assigning ADX to the frame.
+    """
+    adx = frame.ta.adx(length=period)
+    
+    if adx is not None:
+        # pandas-ta ADX returns a Series or DataFrame
+        if isinstance(adx, pd.DataFrame):
+            # Extract ADX column (usually first or named 'ADX_14')
+            adx_col = next((c for c in adx.columns if 'ADX' in c.upper()), adx.columns[0])
+            adx_series = adx[adx_col]
+        else:
+            adx_series = adx
+        
+        if column_name:
+            frame[column_name] = adx_series
+        
+        return adx_series
+    
+    return pd.Series(dtype=float, index=frame.index)
+
+
+def williams_r(
+    frame: pd.DataFrame,
+    *,
+    period: int = 14,
+    column_name: str = "willr",
+) -> pd.Series:
+    """
+    Compute Williams %R using pandas-ta.
+
+    Parameters
+    ----------
+    frame:
+        DataFrame with ``high``, ``low`` and ``close`` columns.
+    period:
+        Williams %R lookback period.
+    column_name:
+        Column name for assigning Williams %R to the frame.
+    """
+    willr = frame.ta.willr(length=period)
+    
+    if column_name and willr is not None:
+        frame[column_name] = willr
+    
+    return willr if willr is not None else pd.Series(dtype=float, index=frame.index)

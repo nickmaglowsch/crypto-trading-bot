@@ -6,11 +6,14 @@ This project provides a small framework for experimenting with Binance spot stra
 - **Intraday Range Fade** – watch the first 4 hours of the session, fade breaks that return into the range.
 - **Bollinger Bands Mean Reversion** – trade bounces off the upper/lower Bollinger Bands, targeting mean reversion back to the middle band.
 - **RSI Mean Reversion** – trade oversold/overbought conditions when RSI drops below 30 or rises above 70.
+- **Stochastic Oscillator** – trade oversold/overbought conditions when Stochastic %K and %D drop below 20 or rise above 80.
 
 **Trend Following Strategies:**
 - **Momentum Breakout** – go with momentum when price pushes above yesterday's high or below yesterday's low.
 - **Moving Average Crossover** – trade golden cross (fast EMA crosses above slow EMA) and death cross (fast EMA crosses below slow EMA).
 - **Volume Breakout** – trade breakouts above recent highs or below recent lows, confirmed by volume spikes above average.
+- **MACD Crossover** – trade when MACD line crosses above/below signal line (bullish/bearish crossovers).
+- **ADX Trend Strength** – trade strong trends confirmed by ADX (only enters when ADX > threshold and price aligns with EMA direction).
 
 The code uses [`ccxt`](https://github.com/ccxt/ccxt) to pull historical candles and pandas to backtest the logic.
 
@@ -60,9 +63,27 @@ To try the Volume Breakout strategy:
 python -m src.run_strategy --strategy volume_breakout --symbol BTC/USDT --timeframe 15m --days 10 --volume-ma-period 20 --volume-multiplier 1.5
 ```
 
+To try the Stochastic Oscillator strategy:
+
+```bash
+python -m src.run_strategy --strategy stochastic --symbol BTC/USDT --timeframe 15m --days 10 --stoch-k-period 14 --stoch-d-period 3
+```
+
+To try the MACD Crossover strategy:
+
+```bash
+python -m src.run_strategy --strategy macd_crossover --symbol BTC/USDT --timeframe 15m --days 10
+```
+
+To try the ADX Trend Strength strategy:
+
+```bash
+python -m src.run_strategy --strategy adx_trend --symbol BTC/USDT --timeframe 15m --days 10 --adx-threshold 25.0
+```
+
 Command line options:
 
-- `--strategy`: Choose `intraday_range` (default), `momentum`, `bollinger_reversion`, `rsi_reversion`, `ma_crossover`, or `volume_breakout`.
+- `--strategy`: Choose `intraday_range` (default), `momentum`, `bollinger_reversion`, `rsi_reversion`, `ma_crossover`, `volume_breakout`, `stochastic`, `macd_crossover`, or `adx_trend`.
 - `--symbol`: Binance market symbol or comma-separated list for a multi-asset run.
 - `--timeframe`: Candle timeframe (1m, 5m, 15m, etc).
 - `--days`: Number of trailing days to evaluate.
@@ -88,6 +109,12 @@ Command line options:
 - `--ema-slow`: Slow EMA period (default 26, only for `ma_crossover` strategy).
 - `--volume-ma-period`: Volume moving average period (default 20, only for `volume_breakout` strategy).
 - `--volume-multiplier`: Volume multiplier threshold for breakout confirmation (default 1.5, only for `volume_breakout` strategy).
+- `--stoch-k-period`: Stochastic %K period (default 14, only for `stochastic` strategy).
+- `--stoch-d-period`: Stochastic %D smoothing period (default 3, only for `stochastic` strategy).
+- `--stoch-oversold`: Stochastic oversold threshold for long entries (default 20.0, only for `stochastic` strategy).
+- `--stoch-overbought`: Stochastic overbought threshold for short entries (default 80.0, only for `stochastic` strategy).
+- `--adx-period`: ADX lookback period (default 14, only for `adx_trend` strategy).
+- `--adx-threshold`: ADX threshold for trend strength confirmation (default 25.0, only for `adx_trend` strategy).
 - `--testnet`: Toggle Binance sandbox mode for future live order routing.
 - `--api-key`/`--api-secret`: Optional credentials (not needed for historical data).
 
